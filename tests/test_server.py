@@ -3,6 +3,19 @@
 import pytest
 
 
+def create_calculation(client, operation="add", a=1, b=2):
+    response = client.post("/calculations", json={"operation": operation, "a": a, "b": b})
+    assert response.status_code == 201
+    return response.json()
+
+
+def assert_default_422(response):
+    assert response.status_code == 422
+    body = response.json()
+    assert set(body) == {"detail"}
+    return body
+
+
 @pytest.mark.parametrize(
     ("path", "a", "b", "expected"),
     [
@@ -28,9 +41,7 @@ def test_divide_by_zero_returns_400(client):
 @pytest.mark.parametrize("path", ["/add", "/subtract", "/multiply", "/divide"])
 def test_invalid_body_returns_default_422(client, path):
     response = client.post(path, json={"a": "x"})
-    assert response.status_code == 422
-    body = response.json()
-    assert set(body) == {"detail"}
+    body = assert_default_422(response)
     assert isinstance(body["detail"], list)
     missing_or_invalid = {tuple(err["loc"]) for err in body["detail"]}
     assert ("body", "a") in missing_or_invalid
@@ -75,8 +86,7 @@ def test_create_calculation_divide_by_zero(client):
 
 def test_create_calculation_invalid_body(client):
     response = client.post("/calculations", json={"operation": "add"})
-    assert response.status_code == 422
-    assert set(response.json()) == {"detail"}
+    assert_default_422(response)
 
 
 def test_list_calculations_empty(client):
@@ -87,33 +97,26 @@ def test_list_calculations_empty(client):
 
 def test_list_calculations_newest_first(client):
     for a in (1, 2, 3):
-        client.post("/calculations", json={"operation": "add", "a": a, "b": 0})
+        create_calculation(client, "add", a, 0)
     response = client.get("/calculations")
     assert response.status_code == 200
     assert [c["a"] for c in response.json()] == [3.0, 2.0, 1.0]
 
 
 def test_get_calculation(client):
-    created = client.post("/calculations", json={"operation": "add", "a": 1, "b": 2}).json()
+    created = create_calculation(client)
     response = client.get(f"/calculations/{created['id']}")
     assert response.status_code == 200
     assert response.json() == created
 
 
-def test_get_calculation_missing(client):
-    response = client.get("/calculations/999")
-    assert response.status_code == 404
-    assert response.json() == {"detail": "Calculation not found"}
-
-
 def test_get_calculation_non_integer_id(client):
     response = client.get("/calculations/abc")
-    assert response.status_code == 422
-    assert set(response.json()) == {"detail"}
+    assert_default_422(response)
 
 
 def test_delete_calculation(client):
-    created = client.post("/calculations", json={"operation": "add", "a": 1, "b": 2}).json()
+    created = create_calculation(client)
     response = client.delete(f"/calculations/{created['id']}")
     assert response.status_code == 204
     assert response.content == b""
@@ -121,8 +124,9 @@ def test_delete_calculation(client):
     assert client.get("/calculations").json() == []
 
 
-def test_delete_calculation_missing(client):
-    response = client.delete("/calculations/999")
+@pytest.mark.parametrize("method", ["get", "delete"])
+def test_missing_calculation_returns_404(client, method):
+    response = getattr(client, method)("/calculations/999")
     assert response.status_code == 404
     assert response.json() == {"detail": "Calculation not found"}
 
