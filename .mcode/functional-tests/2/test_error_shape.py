@@ -82,3 +82,9 @@ def test_unknown_route_404():
 
 def test_method_not_allowed_405():
     err(requests.get(f"{BASE}/add", timeout=T), 405, "method_not_allowed")
+
+
+def test_405_allow_header():
+    r = requests.get(f"{BASE}/add", timeout=T)
+    assert r.status_code == 405
+    assert "POST" in r.headers.get("Allow", "")
