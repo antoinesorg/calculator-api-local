@@ -101,7 +101,8 @@ class JsonFormatter(logging.Formatter):
 def setup_logging() -> None:
     """Attach the JSON handler once. Propagation stays enabled so caplog can capture."""
     logger = logging.getLogger(REQUEST_LOGGER_NAME)
-    logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+    level = logging.getLevelName(os.environ.get("LOG_LEVEL", "INFO").strip().upper())
+    logger.setLevel(level if isinstance(level, int) else logging.INFO)
     if not any(getattr(h, "_calculator_json", False) for h in logger.handlers):
         handler = logging.StreamHandler()
         handler.setFormatter(JsonFormatter())

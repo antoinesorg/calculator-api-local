@@ -87,3 +87,41 @@ def test_existing_endpoints_unaffected(client: TestClient) -> None:
     created = client.post("/calculations", json={"operation": "add", "a": 1, "b": 2})
     assert created.status_code == 201
     assert client.get("/calculations").status_code == 200
+
+
+@pytest.fixture
+def restore_request_logger():
+    logger = logging.getLogger(server.REQUEST_LOGGER_NAME)
+    level, handlers = logger.level, logger.handlers[:]
+    yield logger
+    logger.setLevel(level)
+    logger.handlers[:] = handlers
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("DEBUG", logging.DEBUG),
+        ("warning", logging.WARNING),
+        ("verbose", logging.INFO),
+        (None, logging.INFO),
+    ],
+)
+def test_setup_logging_level(
+    monkeypatch: pytest.MonkeyPatch,
+    restore_request_logger: logging.Logger,
+    value: str | None,
+    expected: int,
+) -> None:
+    if value is None:
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("LOG_LEVEL", value)
+    server.setup_logging()
+    assert restore_request_logger.level == expected
+
+
+def test_setup_logging_attaches_handler_once(restore_request_logger: logging.Logger) -> None:
+    server.setup_logging()
+    server.setup_logging()
+    assert sum(getattr(h, "_calculator_json", False) for h in restore_request_logger.handlers) == 1
