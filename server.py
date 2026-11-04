@@ -111,12 +111,18 @@ ERROR_CODES: dict[int, str] = {
 }
 
 
-def error_response(status_code: int, message: str, details: object = None) -> JSONResponse:
+def error_response(
+    status_code: int,
+    message: str,
+    details: object = None,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     """Build the uniform error body."""
     code = ERROR_CODES.get(status_code, "server_error" if status_code >= 500 else "http_error")
     return JSONResponse(
         status_code=status_code,
         content={"error": {"code": code, "message": message, "details": details}},
+        headers=headers,
     )
 
 
@@ -134,13 +140,13 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     """Wrap HTTPException (including routing 404/405) in the uniform body."""
-    return error_response(exc.status_code, str(exc.detail))
+    return error_response(exc.status_code, str(exc.detail), headers=getattr(exc, "headers", None))
 
 
-@app.exception_handler(ValueError)
-async def value_error_handler(request: Request, exc: ValueError):
-    """Map uncaught ValueError (e.g. divide by zero) to 400."""
-    return error_response(400, str(exc))
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Return 500 in the uniform body without leaking internal messages."""
+    return error_response(500, "Internal server error")
 
 
 # --- Calculator Endpoints ---

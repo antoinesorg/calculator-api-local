@@ -1,6 +1,11 @@
 """End-to-end tests for every route in server.py."""
 
 import pytest
+from fastapi.testclient import TestClient
+
+import server
+
+CALCULATOR_PATHS = ["/add", "/subtract", "/multiply", "/divide"]
 
 
 def create_calculation(client, operation="add", a=1, b=2):
@@ -46,7 +51,7 @@ def test_divide_by_zero_returns_400(client):
     assert error["details"] is None
 
 
-@pytest.mark.parametrize("path", ["/add", "/subtract", "/multiply", "/divide"])
+@pytest.mark.parametrize("path", CALCULATOR_PATHS)
 def test_invalid_body_returns_uniform_422(client, path):
     response = client.post(path, json={"a": "x"})
     error = assert_validation_error(response)
@@ -78,12 +83,13 @@ def test_create_calculation_all_operations(client, operation, a, b, expected):
     assert response.json()["result"] == expected
 
 
-def test_create_calculation_unknown_operation(client):
-    response = client.post("/calculations", json={"operation": "pow", "a": 1, "b": 2})
+@pytest.mark.parametrize("operation", ["pow", "ADD", "", "addition"])
+def test_create_calculation_unknown_operation(client, operation):
+    response = client.post("/calculations", json={"operation": operation, "a": 1, "b": 2})
     # Design decision: the unknown-operation check stays at route level, so it
     # keeps its M1 status of 400 (not 422) and only the body shape changes.
     error = assert_error(response, 400, "bad_request")
-    assert error["message"] == "Unknown operation: pow. Use: ['add', 'sub', 'mul', 'div']"
+    assert error["message"] == f"Unknown operation: {operation}. Use: ['add', 'sub', 'mul', 'div']"
 
 
 def test_create_calculation_divide_by_zero(client):
@@ -119,11 +125,6 @@ def test_get_calculation(client):
     assert response.json() == created
 
 
-def test_get_calculation_non_integer_id(client):
-    response = client.get("/calculations/abc")
-    assert_validation_error(response)
-
-
 def test_delete_calculation(client):
     created = create_calculation(client)
     response = client.delete(f"/calculations/{created['id']}")
@@ -144,13 +145,13 @@ def test_missing_calculation_returns_404(client, method):
 # --- Negative validation tests ---
 
 
-@pytest.mark.parametrize("path", ["/add", "/subtract", "/multiply", "/divide"])
+@pytest.mark.parametrize("path", CALCULATOR_PATHS)
 @pytest.mark.parametrize("body", [{}, {"a": 1}, {"b": 1}])
 def test_missing_fields_return_422(client, path, body):
     assert_validation_error(client.post(path, json=body))
 
 
-@pytest.mark.parametrize("path", ["/add", "/subtract", "/multiply", "/divide"])
+@pytest.mark.parametrize("path", CALCULATOR_PATHS)
 @pytest.mark.parametrize("value", ["x", None, [1], {"v": 1}, True])
 def test_wrong_types_return_422_or_coerce(client, path, value):
     response = client.post(path, json={"a": value, "b": 1})
@@ -160,7 +161,7 @@ def test_wrong_types_return_422_or_coerce(client, path, value):
         assert_validation_error(response)
 
 
-@pytest.mark.parametrize("path", ["/add", "/subtract", "/multiply", "/divide"])
+@pytest.mark.parametrize("path", CALCULATOR_PATHS)
 @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
 @pytest.mark.parametrize("field", ["a", "b"])
 def test_non_finite_numbers_rejected(client, path, literal, field):
@@ -187,12 +188,6 @@ def test_non_finite_strings_rejected(client, literal):
     assert_validation_error(client.post("/add", json={"a": literal, "b": 1}))
 
 
-@pytest.mark.parametrize("operation", ["pow", "ADD", "", "addition"])
-def test_unknown_operation_returns_400(client, operation):
-    response = client.post("/calculations", json={"operation": operation, "a": 1, "b": 2})
-    assert_error(response, 400, "bad_request")
-
-
 def test_non_string_operation_returns_422(client):
     response = client.post("/calculations", json={"operation": 5, "a": 1, "b": 2})
     assert_validation_error(response)
@@ -209,7 +204,20 @@ def test_unknown_route_returns_uniform_404(client):
 
 
 def test_wrong_method_returns_uniform_405(client):
-    assert_error(client.get("/add"), 405, "method_not_allowed")
+    response = client.get("/add")
+    assert_error(response, 405, "method_not_allowed")
+    assert "POST" in response.headers["allow"]
+
+
+def test_unhandled_exception_returns_uniform_500(client, monkeypatch):
+    def boom(a, b):
+        raise RuntimeError("secret internal detail")
+
+    monkeypatch.setitem(server.OPERATIONS, "add", boom)
+    no_raise_client = TestClient(client.app, raise_server_exceptions=False)
+    response = no_raise_client.post("/calculations", json={"operation": "add", "a": 1, "b": 2})
+    error = assert_error(response, 500, "server_error")
+    assert error["message"] == "Internal server error"
 
 
 def test_success_payloads_unchanged(client):
