@@ -5,7 +5,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import AsyncGenerator
 
+import json
+import logging
 import os
+import time
+import uuid
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
@@ -15,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from pydantic import Field as PydanticField
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from core import add, divide, multiply, subtract
@@ -78,6 +83,77 @@ class ResultResponse(BaseModel):
     result: float
 
 
+# --- Request Logging ---
+
+REQUEST_LOGGER_NAME = "calculator.access"
+LOG_FIELDS = ("method", "path", "status", "duration_ms", "request_id")
+
+
+class JsonFormatter(logging.Formatter):
+    """Format request log records as one JSON object per line."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {"level": record.levelname, "logger": record.name}
+        payload.update({k: getattr(record, k) for k in LOG_FIELDS if hasattr(record, k)})
+        return json.dumps(payload)
+
+
+def setup_logging() -> None:
+    """Attach the JSON handler once. Propagation stays enabled so caplog can capture."""
+    logger = logging.getLogger(REQUEST_LOGGER_NAME)
+    logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+    if not any(getattr(h, "_calculator_json", False) for h in logger.handlers):
+        handler = logging.StreamHandler()
+        handler.setFormatter(JsonFormatter())
+        handler._calculator_json = True  # type: ignore[attr-defined]
+        logger.addHandler(handler)
+
+
+class RequestLoggingMiddleware:
+    """Pure ASGI middleware: logs method, path, status, duration and request id.
+
+    Request and response bodies are never read or logged.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self.logger = logging.getLogger(REQUEST_LOGGER_NAME)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        request_id = headers.get(b"x-request-id", b"").decode("latin-1") or str(uuid.uuid4())
+        status = 500  # reported if the app raises before sending a response
+        start = time.perf_counter()
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                message = {
+                    **message,
+                    "headers": [*message.get("headers", []), (b"x-request-id", request_id.encode("latin-1"))],
+                }
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        finally:
+            self.logger.info(
+                "request",
+                extra={
+                    "method": scope["method"],
+                    "path": scope["path"],
+                    "status": status,
+                    "duration_ms": round((time.perf_counter() - start) * 1000, 3),
+                    "request_id": request_id,
+                },
+            )
+
+
 # --- App Setup ---
 
 
@@ -89,6 +165,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="Calculator API", version="0.1.0", lifespan=lifespan)
+
+setup_logging()
+app.add_middleware(RequestLoggingMiddleware)
 
 OPERATIONS: dict[str, callable] = {  # type: ignore[type-arg]
     "add": add,
@@ -147,6 +226,15 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """Return 500 in the uniform body without leaking internal messages."""
     return error_response(500, "Internal server error")
+
+
+# --- Health Endpoint ---
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    """Liveness check."""
+    return {"status": "ok"}
 
 
 # --- Calculator Endpoints ---
