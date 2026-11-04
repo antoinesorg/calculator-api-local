@@ -8,8 +8,13 @@ from typing import AsyncGenerator
 import os
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Path, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from pydantic import Field as PydanticField
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from core import add, divide, multiply, subtract
@@ -49,8 +54,8 @@ class CalculationCreate(BaseModel):
     """Request body for creating a calculation."""
 
     operation: str
-    a: float
-    b: float
+    a: float = PydanticField(allow_inf_nan=False)
+    b: float = PydanticField(allow_inf_nan=False)
 
 
 class CalculationResponse(CalculationBase):
@@ -63,8 +68,8 @@ class CalculationResponse(CalculationBase):
 class CalculationRequest(BaseModel):
     """Request body for calculation endpoints."""
 
-    a: float
-    b: float
+    a: float = PydanticField(allow_inf_nan=False)
+    b: float = PydanticField(allow_inf_nan=False)
 
 
 class ResultResponse(BaseModel):
@@ -91,6 +96,51 @@ OPERATIONS: dict[str, callable] = {  # type: ignore[type-arg]
     "mul": multiply,
     "div": divide,
 }
+
+
+# --- Error Handlers ---
+# Every error response has the shape {"error": {"code", "message", "details"}}.
+# `code` is derived from the HTTP status; unknown operations stay 400 via a
+# route-level check, validation failures stay 422.
+
+ERROR_CODES: dict[int, str] = {
+    400: "bad_request",
+    404: "not_found",
+    405: "method_not_allowed",
+    422: "validation_error",
+}
+
+
+def error_response(status_code: int, message: str, details: object = None) -> JSONResponse:
+    """Build the uniform error body."""
+    code = ERROR_CODES.get(status_code, "server_error" if status_code >= 500 else "http_error")
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"code": code, "message": message, "details": details}},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Return 422 with the validation errors in `details`."""
+    # `input` and `ctx` are dropped: the input may be NaN/inf (not JSON serializable)
+    # and ctx may hold exception objects.
+    details = [
+        {key: err[key] for key in ("type", "loc", "msg") if key in err} for err in exc.errors()
+    ]
+    return error_response(422, "Request validation failed", jsonable_encoder(details))
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """Wrap HTTPException (including routing 404/405) in the uniform body."""
+    return error_response(exc.status_code, str(exc.detail))
+
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError):
+    """Map uncaught ValueError (e.g. divide by zero) to 400."""
+    return error_response(400, str(exc))
 
 
 # --- Calculator Endpoints ---
@@ -155,7 +205,7 @@ def list_calculations(session: Session = Depends(get_session)) -> list[Calculati
 
 
 @app.get("/calculations/{calculation_id}", response_model=CalculationResponse)
-def get_calculation(calculation_id: int, session: Session = Depends(get_session)) -> Calculation:
+def get_calculation(calculation_id: int = Path(gt=0), session: Session = Depends(get_session)) -> Calculation:
     """Get a specific calculation by ID."""
     calculation = session.get(Calculation, calculation_id)
     if not calculation:
@@ -164,7 +214,7 @@ def get_calculation(calculation_id: int, session: Session = Depends(get_session)
 
 
 @app.delete("/calculations/{calculation_id}", status_code=204)
-def delete_calculation(calculation_id: int, session: Session = Depends(get_session)) -> None:
+def delete_calculation(calculation_id: int = Path(gt=0), session: Session = Depends(get_session)) -> None:
     """Delete a calculation by ID."""
     calculation = session.get(Calculation, calculation_id)
     if not calculation:

@@ -20,19 +20,19 @@ def test_arithmetic_happy(op, a, b, exp):
 def test_divide_by_zero():
     r = post("/divide", {"a": 1, "b": 0})
     assert r.status_code == 400
-    assert r.json() == {"detail": "Cannot divide by zero"}
+    assert r.json()["error"] == {"code": "bad_request", "message": "Cannot divide by zero", "details": None}
 
 
 def test_missing_field_422():
     r = post("/add", {"a": 1})
     assert r.status_code == 422
-    assert isinstance(r.json()["detail"], list)
+    assert isinstance(r.json()["error"]["details"], list)
 
 
 def test_invalid_type_422():
     r = post("/multiply", {"a": "x", "b": 1})
     assert r.status_code == 422
-    assert isinstance(r.json()["detail"], list)
+    assert isinstance(r.json()["error"]["details"], list)
 
 
 def test_crud_lifecycle():
